@@ -514,6 +514,7 @@ export const DeviceModels = {
   Frame: "Brilliant Frame",
   Nimo: "NIMO",
   R1: "Even Realities R1",
+  Cyclops: "Cyclops",
 } as const
 
 export type DeviceModel = (typeof DeviceModels)[keyof typeof DeviceModels]

@@ -230,7 +230,7 @@ To keep the BLE link alive while the app is backgrounded, enable Core Bluetooth 
 
 ## Scope
 
-This Swift package contains the core iOS Bluetooth SDK. It intentionally excludes optional MentraOS-internal code paths for local STT, offline TTS, Nex/SwiftProtobuf, Vuzix/Ultralite, and tar.bz2 extraction.
+This Swift package contains the core iOS Bluetooth SDK. It intentionally excludes optional MentraOS-internal code paths for local STT, offline TTS, Nex/Cyclops/SwiftProtobuf, Vuzix/Ultralite, and tar.bz2 extraction.
 EOF
 perl -0pi -e "s/__SDK_VERSION__/${sdk_version}/g" "$target_root/README.md"
 
@@ -240,6 +240,7 @@ cp "$repo_root/LICENSE" "$target_root/LICENSE"
 # not exported in the public SwiftPM package.
 source_excludes=(
   "/Bridging-Header.h"
+  "/sgcs/Cyclops.swift"
   "/sgcs/Mach1.swift"
   "/sgcs/MentraNex.swift"
   "/sgcs/mentraos_ble.pb.swift"

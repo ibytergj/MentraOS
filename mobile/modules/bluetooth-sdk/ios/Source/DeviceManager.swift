@@ -628,10 +628,14 @@ struct ViewState {
             sgc = Nimo()
         } else if wearable.contains(DeviceTypes.FRAME) {
             // sgc = FrameManager()
-        } else if wearable.contains(DeviceTypes.CYCLOPS) {
-            sgc = CyclopsSGC.getCyclopsInstance()
         }
 #if !SWIFT_PACKAGE || MENTRA_FEATURE_NEX
+        // CyclopsSGC subclasses MentraNexSGC, so it must ride the same feature
+        // gate: the public SwiftPM package excludes MentraNex.swift and the
+        // SwiftProtobuf-dependent gencode it needs.
+        if sgc == nil && wearable.contains(DeviceTypes.CYCLOPS) {
+            sgc = CyclopsSGC.getCyclopsInstance()
+        }
         if sgc == nil && wearable.contains(DeviceTypes.NEX) {
             sgc = MentraNexSGC.getInstance()
         }
