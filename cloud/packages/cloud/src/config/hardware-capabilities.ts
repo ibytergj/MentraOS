@@ -11,6 +11,7 @@ import { evenRealitiesG1 } from "./capabilities/even-realities-g1";
 import { evenRealitiesG2 } from "./capabilities/even-realities-g2";
 import { mentraDisplay } from "./capabilities/mentra-display";
 import { mentraLive } from "./capabilities/mentra-live";
+import { cyclops } from "./capabilities/cyclops";
 import { simulatedGlasses } from "./capabilities/simulated-glasses";
 import { vuzixZ100 } from "./capabilities/vuzix-z100";
 import { nimo } from "./capabilities/nimo";
@@ -26,6 +27,7 @@ export const HARDWARE_CAPABILITIES: Record<string, Capabilities> = {
   [evenRealitiesG2.modelName]: evenRealitiesG2,
   [mentraDisplay.modelName]: mentraDisplay,
   [mentraLive.modelName]: mentraLive,
+  [cyclops.modelName]: cyclops,
   [simulatedGlasses.modelName]: simulatedGlasses,
   [vuzixZ100.modelName]: vuzixZ100,
   [nimo.modelName]: nimo,

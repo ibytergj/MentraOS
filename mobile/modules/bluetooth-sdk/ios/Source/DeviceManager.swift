@@ -628,6 +628,8 @@ struct ViewState {
             sgc = Nimo()
         } else if wearable.contains(DeviceTypes.FRAME) {
             // sgc = FrameManager()
+        } else if wearable.contains(DeviceTypes.CYCLOPS) {
+            sgc = CyclopsSGC.getCyclopsInstance()
         }
 #if !SWIFT_PACKAGE || MENTRA_FEATURE_NEX
         if sgc == nil && wearable.contains(DeviceTypes.NEX) {

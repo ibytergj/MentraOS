@@ -637,7 +637,8 @@ class MentraNexSGC: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, SG
 
     // MARK: - Initialization
 
-    override private init() {
+    /* Cyclops fork: internal (was private) so CyclopsSGC can subclass. */
+    override init() {
         super.init()
         Bridge.log("NEX: 🚀 MentraNexSGC initialization started")
 
@@ -907,12 +908,18 @@ class MentraNexSGC: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, SG
 
     // MARK: - Enhanced Device Filtering (ported from Java)
 
-    private func isCompatibleNexDevice(_ deviceName: String) -> Bool {
-        // Keep in parity with Android MentraNex.kt scan filter.
-        let compatiblePrefixes = [
+    /* Cyclops fork: the per-device parts of the scan filter are overridable
+     * computed vars so a subclass changes only these, not the logic. */
+    var compatibleNamePrefixes: [String] {
+        [
             "Nex1-",
             "MENTRA_DISPLAY_",
         ]
+    }
+
+    private func isCompatibleNexDevice(_ deviceName: String) -> Bool {
+        // Keep in parity with Android MentraNex.kt scan filter.
+        let compatiblePrefixes = compatibleNamePrefixes
 
         for prefix in compatiblePrefixes {
             if deviceName.contains(prefix) {
@@ -924,14 +931,19 @@ class MentraNexSGC: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, SG
         return false
     }
 
-    private func extractDeviceId(from deviceName: String) -> String? {
-        // Extract device ID pattern similar to Java implementation
-        let patterns = [
+    /* Cyclops fork: overridable for subclass device-name schemes. */
+    var deviceIdPatterns: [String] {
+        [
             "Mentra_([0-9A-Fa-f]+)",
             "NEX_([0-9A-Fa-f]+)",
             "MENTRA_NEX_([0-9A-Fa-f]+)",
             "MENTRA_DISPLAY_([0-9A-Fa-f]+)",
         ]
+    }
+
+    private func extractDeviceId(from deviceName: String) -> String? {
+        // Extract device ID pattern similar to Java implementation
+        let patterns = deviceIdPatterns
 
         for pattern in patterns {
             let regex = try? NSRegularExpression(pattern: pattern)

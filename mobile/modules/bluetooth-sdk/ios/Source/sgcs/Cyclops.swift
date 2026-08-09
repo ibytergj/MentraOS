@@ -1,0 +1,251 @@
+//
+//  Cyclops.swift
+//  OpenWearableAI Cyclops driver — a thin subclass of MentraNexSGC.
+//
+//  Cyclops firmware implements the MentraOS OEM firmware spec (GATT service
+//  4860, protobuf control, LC3 mic on 0xA0) — the exact protocol MentraNexSGC
+//  already speaks. The deltas, per the ADR-0008 distribution-ladder decision:
+//    1. Scan filter: advertised name "OpenWearableAI" (no Nex1-/MENTRA_ prefix)
+//    2. Device type: DeviceTypes.CYCLOPS (displayless, camera+mic — the
+//       capability tables carry the truth; DeviceInfo self-report is logged
+//       only, same as upstream)
+//    3. Photo channel: OWAI L2CAP CoC stream (PSM published in GATT char
+//       F00D0005; stream format ['OWAI'][total][crc32][w][h][JPEG]) — the
+//       spec has no camera chapter yet, so photos ride our own channel
+//       (hybrid decision, owner 2026-08-06). Reader ported from the proven
+//       Viewfinder CocPhotoReader (phone/CyclopsViewfinder in the
+//       OpenWearableAI repo).
+//
+//  All display-path behavior is inherited and harmless: the firmware answers
+//  unknown/unsupported commands per the spec's forward-compatibility rule.
+//
+
+import CoreBluetooth
+import Foundation
+
+class CyclopsSGC: MentraNexSGC {
+    // MARK: - Singleton (parallel to MentraNexSGC.getInstance())
+
+    static var cyclopsInstance: CyclopsSGC?
+
+    @objc static func getCyclopsInstance() -> CyclopsSGC {
+        if let existing = cyclopsInstance {
+            return existing
+        }
+        let created = CyclopsSGC()
+        cyclopsInstance = created
+        return created
+    }
+
+    override init() {
+        super.init()
+        type = DeviceTypes.CYCLOPS
+        Bridge.log("CYCLOPS: driver initialized (subclass of MentraNexSGC)")
+    }
+
+    // MARK: - Scan filter deltas
+
+    override var compatibleNamePrefixes: [String] {
+        ["OpenWearableAI"]
+    }
+
+    override var deviceIdPatterns: [String] {
+        // Devkit advertises a fixed name; treat the whole name as the ID.
+        ["(OpenWearableAI)"]
+    }
+
+    // MARK: - OWAI photo channel (L2CAP CoC)
+
+    private let OWAI_SERVICE_UUID = CBUUID(string: "F00D0001-1C77-429A-D14C-1E0F62518C9E")
+    private let OWAI_PSM_CHAR_UUID = CBUUID(string: "F00D0005-1C77-429A-D14C-1E0F62518C9E")
+
+    private var photoChannel: CBL2CAPChannel?
+    private var photoReader: CyclopsCocPhotoReader?
+
+    /* CoreBluetooth delegate methods are @objc protocol members, so these
+     * overrides dispatch correctly even if the parent implements them in an
+     * extension. Every override calls super first — the Nex protocol path
+     * (4860 discovery, protobuf, mic) is untouched. */
+
+    override func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        super.centralManager(central, didConnect: peripheral)
+        // Additional discovery for the OWAI service (photo PSM lives there).
+        peripheral.discoverServices([OWAI_SERVICE_UUID])
+    }
+
+    override func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
+        super.peripheral(peripheral, didDiscoverServices: error)
+        if let svc = peripheral.services?.first(where: { $0.uuid == OWAI_SERVICE_UUID }) {
+            peripheral.discoverCharacteristics([OWAI_PSM_CHAR_UUID], for: svc)
+        }
+    }
+
+    override func peripheral(_ peripheral: CBPeripheral,
+                             didDiscoverCharacteristicsFor service: CBService,
+                             error: Error?) {
+        super.peripheral(peripheral, didDiscoverCharacteristicsFor: service, error: error)
+        if service.uuid == OWAI_SERVICE_UUID,
+           let psmChar = service.characteristics?.first(where: { $0.uuid == OWAI_PSM_CHAR_UUID }) {
+            peripheral.readValue(for: psmChar)
+        }
+    }
+
+    override func peripheral(_ peripheral: CBPeripheral,
+                             didUpdateValueFor characteristic: CBCharacteristic,
+                             error: Error?) {
+        if characteristic.uuid == OWAI_PSM_CHAR_UUID {
+            if let data = characteristic.value, data.count >= 2 {
+                let psm = CBL2CAPPSM(UInt16(data[data.startIndex])
+                    | UInt16(data[data.startIndex + 1]) << 8)
+                if psm != 0 {
+                    Bridge.log("CYCLOPS: photo CoC PSM \(psm) — opening channel")
+                    peripheral.openL2CAPChannel(psm)
+                }
+            }
+            return
+        }
+        super.peripheral(peripheral, didUpdateValueFor: characteristic, error: error)
+    }
+
+    /* MentraNexSGC (display device, no L2CAP) does not implement didOpen —
+     * no override keyword. If upstream ever adds one, the compiler will say
+     * so on the Mac and this becomes an override calling super. */
+    func peripheral(_ peripheral: CBPeripheral, didOpen channel: CBL2CAPChannel?, error: Error?) {
+        guard let channel else {
+            Bridge.log("CYCLOPS: CoC open failed: \(error?.localizedDescription ?? "?")")
+            return
+        }
+        photoChannel = channel
+        let reader = CyclopsCocPhotoReader { [weak self] jpeg, width, height in
+            self?.handlePhoto(jpeg: jpeg, width: width, height: height)
+        }
+        photoReader = reader
+        reader.attach(channel: channel)
+        Bridge.log("CYCLOPS: photo CoC channel open (mtu in \(channel.inputStream != nil ? "ok" : "?"))")
+    }
+
+    private func handlePhoto(jpeg: Data, width: UInt16, height: UInt16) {
+        Bridge.log("CYCLOPS: 📸 photo received: \(jpeg.count) B (\(width)x\(height))")
+        // TODO(next session, on-Mac): route into the app's photo-request flow
+        // (BlePhotoUploadService.processAndUploadPhoto with the pending
+        // requestId/webhookUrl, per the MentraLive pattern). Until a photo
+        // request correlates it, the frame is logged and retained.
+        lastPhoto = jpeg
+    }
+
+    /// Most recent photo delivered over the CoC channel (debug surface until
+    /// the photo-request flow is wired).
+    private(set) var lastPhoto: Data?
+
+    override func cleanup() {
+        photoReader?.detach()
+        photoReader = nil
+        photoChannel = nil
+        super.cleanup()
+    }
+}
+
+// MARK: - CoC stream reader (ported from Viewfinder CocPhotoReader.swift)
+
+/// Parses the OWAI photo stream: ['OWAI' u32][total u32][crc32 u32][w u16]
+/// [h u16][JPEG bytes...], all little-endian. CoC is ordered and lossless;
+/// the CRC guards firmware-side truncation only.
+final class CyclopsCocPhotoReader: NSObject, StreamDelegate {
+    private static let headerLen = 16
+    private static let magic: UInt32 = 0x4941_574F // 'OWAI' LE
+
+    private let onPhoto: (Data, UInt16, UInt16) -> Void
+    private var channel: CBL2CAPChannel?
+    private var buf = Data()
+
+    init(onPhoto: @escaping (Data, UInt16, UInt16) -> Void) {
+        self.onPhoto = onPhoto
+    }
+
+    func attach(channel: CBL2CAPChannel) {
+        self.channel = channel
+        guard let input = channel.inputStream else { return }
+        input.delegate = self
+        input.schedule(in: .main, forMode: .default)
+        input.open()
+        channel.outputStream?.open()
+    }
+
+    func detach() {
+        if let input = channel?.inputStream {
+            input.close()
+            input.remove(from: .main, forMode: .default)
+            input.delegate = nil
+        }
+        channel?.outputStream?.close()
+        channel = nil
+        buf.removeAll()
+    }
+
+    func stream(_ aStream: Stream, handle eventCode: Stream.Event) {
+        switch eventCode {
+        case .hasBytesAvailable:
+            guard let input = aStream as? InputStream else { return }
+            var chunk = [UInt8](repeating: 0, count: 8192)
+            while input.hasBytesAvailable {
+                let n = input.read(&chunk, maxLength: chunk.count)
+                if n <= 0 { break }
+                buf.append(contentsOf: chunk[0 ..< n])
+            }
+            drain()
+        case .errorOccurred:
+            Bridge.log("CYCLOPS: photo stream error: \(aStream.streamError?.localizedDescription ?? "?")")
+        case .endEncountered:
+            Bridge.log("CYCLOPS: photo stream closed by peer")
+        default:
+            break
+        }
+    }
+
+    private func le32(_ offset: Int) -> UInt32 {
+        var v: UInt32 = 0
+        for i in (0 ..< 4).reversed() {
+            v = v << 8 | UInt32(buf[buf.startIndex + offset + i])
+        }
+        return v
+    }
+
+    private func le16(_ offset: Int) -> UInt16 {
+        UInt16(buf[buf.startIndex + offset]) | UInt16(buf[buf.startIndex + offset + 1]) << 8
+    }
+
+    private func drain() {
+        while buf.count >= Self.headerLen {
+            guard le32(0) == Self.magic else {
+                Bridge.log("CYCLOPS: bad photo stream magic — resyncing")
+                buf.removeAll()
+                return
+            }
+            let total = Int(le32(4))
+            let want = Self.headerLen + total
+            guard buf.count >= want else { return }
+            let crc = le32(8)
+            let width = le16(12)
+            let height = le16(14)
+            let jpeg = buf.subdata(in: (buf.startIndex + Self.headerLen) ..< (buf.startIndex + want))
+            buf.removeSubrange(buf.startIndex ..< (buf.startIndex + want))
+            if crc32(jpeg) == crc {
+                onPhoto(jpeg, width, height)
+            } else {
+                Bridge.log("CYCLOPS: photo CRC mismatch — frame dropped")
+            }
+        }
+    }
+
+    /// zlib-compatible CRC32 (matches esp_rom_crc32_le on the board).
+    private func crc32(_ data: Data) -> UInt32 {
+        var crc: UInt32 = 0xFFFF_FFFF
+        for byte in data {
+            crc ^= UInt32(byte)
+            for _ in 0 ..< 8 {
+                crc = (crc & 1) != 0 ? (crc >> 1) ^ 0xEDB8_8320 : crc >> 1
+            }
+        }
+        return ~crc
+    }
+}
