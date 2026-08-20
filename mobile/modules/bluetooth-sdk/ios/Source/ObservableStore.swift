@@ -9,6 +9,14 @@ import Foundation
 
 @MainActor
 class ObservableStore {
+    /* The @MainActor annotation does not hold at runtime: CoreBluetooth-queue
+     * callers invoke these methods without await (Swift 5 mode), so `values`
+     * is touched from multiple threads. The 2026-08-20 Cyclops pairing crash
+     * (EXC_BAD_ACCESS iterating `values` in getCategory during a discovery
+     * write burst) is that race. Real synchronization via NSLock; emits stay
+     * outside the critical section so a listener re-entering the store cannot
+     * deadlock. */
+    private let stateLock = NSLock()
     private var values: [String: Any] = [:]
     private var onEmit: ((String, [String: Any]) -> Void)?
     private var listeners: [String: (String, [String: Any]) -> Void] = [:]
@@ -26,30 +34,37 @@ class ObservableStore {
 
     func addListener(_ listener: @escaping (String, [String: Any]) -> Void) -> String {
         let id = UUID().uuidString
+        stateLock.lock()
         listeners[id] = listener
+        stateLock.unlock()
         return id
     }
 
     func removeListener(_ id: String) {
+        stateLock.lock()
         listeners.removeValue(forKey: id)
+        stateLock.unlock()
     }
 
     func set(_ category: String, _ key: String, _ value: Any) {
         let normalizedCategory = Self.normalizeCategory(category)
         let fullKey = "\(normalizedCategory).\(key)"
-        let oldValue = values[fullKey]
 
+        stateLock.lock()
+        let oldValue = values[fullKey]
         // Skip if unchanged
         if let old = oldValue, areEqual(old, value) {
+            stateLock.unlock()
             return
         }
-
         values[fullKey] = value
+        let listenersCopy = Array(listeners.values)
+        stateLock.unlock()
 
-        // Emit immediately
+        // Emit outside the lock
         let changes = [key: value]
         onEmit?(normalizedCategory, changes)
-        for listener in Array(listeners.values) {
+        for listener in listenersCopy {
             listener(normalizedCategory, changes)
         }
     }
@@ -57,25 +72,37 @@ class ObservableStore {
     func remove(_ category: String, _ key: String) {
         let normalizedCategory = Self.normalizeCategory(category)
         let fullKey = "\(normalizedCategory).\(key)"
-        guard values[fullKey] != nil else { return }
+        stateLock.lock()
+        guard values[fullKey] != nil else {
+            stateLock.unlock()
+            return
+        }
         values.removeValue(forKey: fullKey)
+        let listenersCopy = Array(listeners.values)
+        stateLock.unlock()
         // Emit updated category snapshot so UI listeners clear the removed key
         let snapshot = getCategory(normalizedCategory)
         onEmit?(normalizedCategory, snapshot)
-        for listener in Array(listeners.values) { listener(normalizedCategory, snapshot) }
+        for listener in listenersCopy { listener(normalizedCategory, snapshot) }
     }
 
     func get(_ category: String, _ key: String) -> Any? {
-        values["\(Self.normalizeCategory(category)).\(key)"]
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return values["\(Self.normalizeCategory(category)).\(key)"]
     }
 
     func wouldSkipSet(_ category: String, _ key: String, _ value: Any) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
         let fullKey = "\(Self.normalizeCategory(category)).\(key)"
         guard let oldValue = values[fullKey] else { return false }
         return areEqual(oldValue, value)
     }
 
     func getCategory(_ category: String) -> [String: Any] {
+        stateLock.lock()
+        defer { stateLock.unlock() }
         var result: [String: Any] = [:]
         let prefix = "\(Self.normalizeCategory(category))."
         for (key, value) in values where key.hasPrefix(prefix) {
