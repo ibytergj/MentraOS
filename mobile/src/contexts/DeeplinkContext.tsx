@@ -201,7 +201,9 @@ const deepLinkRoutes: DeepLinkRoute[] = [
       const query = new URLSearchParams(url.split("?")[1]?.split("#")[0] ?? "")
       const handoffCode = params.code ?? query.get("code")
       const handoffState = params.state ?? query.get("state")
-      if (handoffCode && handoffState && !url.includes("#")) {
+      // An empty trailing "#" (the dev account server appends one) must not
+      // defeat the handoff — test for an actual fragment, not the "#" itself.
+      if (handoffCode && handoffState && !url.split("#")[1]) {
         const res = await mentraAuth.completeOAuthHandoff({code: handoffCode, state: handoffState})
         try {
           WebBrowser.dismissBrowser()
