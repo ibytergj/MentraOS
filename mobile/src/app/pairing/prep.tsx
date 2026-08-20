@@ -439,6 +439,35 @@ export default function PairingPrepScreen() {
     )
   }
 
+  const CyclopsPairingGuide = () => {
+    return (
+      <View className="flex-1 mt-6">
+        <ScrollView showsVerticalScrollIndicator={false}>
+          <Text tx="pairing:instructions" className="text-2xl font-bold mb-4 text-secondary-foreground" />
+          <Text
+            className="text-lg text-secondary-foreground mb-2"
+            text="1. Power the Korvo-1 board and wait a few seconds for it to boot."
+          />
+          <Text
+            className="text-lg text-secondary-foreground mb-2"
+            text="2. The board advertises automatically as OpenWearableAI - no pairing button needed."
+          />
+          <Text
+            className="text-lg text-secondary-foreground mb-2"
+            text="3. Keep the board within a few meters of your phone."
+          />
+          {Platform.OS === "ios" && (
+            <Text
+              className="text-lg text-secondary-foreground mb-2"
+              text="4. If prompted, allow the Bluetooth pairing request."
+            />
+          )}
+          <View className="h-6" />
+        </ScrollView>
+      </View>
+    )
+  }
+
   const renderGuide = () => {
     switch (deviceModel) {
       case DeviceTypes.SIMULATED:
@@ -457,6 +486,8 @@ export default function PairingPrepScreen() {
         return <MentraDisplayGlassesPairingGuide />
       case DeviceTypes.NIMO:
         return <NimoPairingGuide />
+      case DeviceTypes.CYCLOPS:
+        return <CyclopsPairingGuide />
     }
 
     throw new Error(`Unknown model name: ${deviceModel}`)
