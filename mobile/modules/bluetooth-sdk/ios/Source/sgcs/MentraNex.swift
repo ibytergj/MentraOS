@@ -2636,7 +2636,10 @@ class MentraNexSGC: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, SG
     private func emitDiscoveredDevice(_ name: String) {
         // Emit device discovery event using standardized typed message function
         Bridge.log("NEX: 📡 Emitting discovered device: \(name)")
-        Bridge.sendDiscoveredDevice(DeviceTypes.NEX, name)
+        // Emit the instance's actual type, not a hardcoded NEX: subclasses
+        // (CyclopsSGC) share this discovery path, and the scan screen filters
+        // results by the model it asked for.
+        Bridge.sendDiscoveredDevice(type, name)
     }
 
     private func updateConnectedState(isConnected: Bool) {
