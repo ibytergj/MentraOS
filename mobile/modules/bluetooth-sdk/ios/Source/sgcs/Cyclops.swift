@@ -22,6 +22,7 @@
 
 import CoreBluetooth
 import Foundation
+import ImageIO
 import Photos
 
 class CyclopsSGC: MentraNexSGC {
@@ -127,13 +128,36 @@ class CyclopsSGC: MentraNexSGC {
 
     private func handlePhoto(jpeg: Data, width: UInt16, height: UInt16) {
         Bridge.log("CYCLOPS: 📸 photo received: \(jpeg.count) B (\(width)x\(height))")
-        lastPhoto = jpeg
+        /* Orientation is corrected HERE, at the point frames enter the driver,
+         * so every consumer (camera roll today; gallery index and miniapp
+         * delivery later) inherits it. Sensor-side correction is closed:
+         * bsp_camera_set_orientation() -> ESP_ERR_NOT_SUPPORTED (2026-08-21).
+         * .downMirrored (EXIF 4, pure vertical flip) per the 08-05
+         * scene-verified finding and the Viewfinder's identical correction. */
+        let corrected = reoriented(jpeg, .downMirrored)
+        lastPhoto = corrected
         // Local-first delivery (owner decision 2026-08-20): every frame goes
         // straight to the iOS photo library — no cloud, no sync step. The
         // in-app Gallery index (localStorageService rows, export receipts) is
         // a follow-up; requestId-correlated miniapp delivery is gated on the
         // cloud-photo decision in PROJECT_STATE.
-        saveToPhotoLibrary(jpeg)
+        saveToPhotoLibrary(corrected)
+    }
+
+    /// Returns `jpeg` with its EXIF orientation tag set. ImageIO copies the
+    /// compressed pixel data untouched and only rewrites metadata — no
+    /// re-encode. Falls back to the input unchanged if anything fails: never
+    /// lose the frame over a metadata edit.
+    private func reoriented(_ jpeg: Data, _ orientation: CGImagePropertyOrientation) -> Data {
+        guard let src = CGImageSourceCreateWithData(jpeg as CFData, nil),
+              let uti = CGImageSourceGetType(src) else { return jpeg }
+        let out = NSMutableData()
+        guard let dst = CGImageDestinationCreateWithData(out, uti, 1, nil) else { return jpeg }
+        var props = (CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]) ?? [:]
+        props[kCGImagePropertyOrientation] = orientation.rawValue
+        CGImageDestinationAddImageFromSource(dst, src, 0, props as CFDictionary)
+        guard CGImageDestinationFinalize(dst) else { return jpeg }
+        return out as Data
     }
 
     private func saveToPhotoLibrary(_ jpeg: Data) {
