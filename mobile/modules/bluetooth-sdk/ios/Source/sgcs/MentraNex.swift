@@ -974,6 +974,39 @@ class MentraNexSGC: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, SG
         startScan()
     }
 
+    /* Fallback for the stored-UUID fast path: iOS rotates peripheral
+     * identifiers (BLE cache resets, phone reboots), and connect() on a stale
+     * cached peripheral pends forever while the real device advertises unheard
+     * — with the scan halted, reconnection wedges permanently (observed
+     * 2026-08-20: Cyclops after a reflash + reinstall cycle; board MAC
+     * unchanged, iOS identifier rotated). If didConnect hasn't fired in time,
+     * cancel the pending connect and rescan by name. */
+    private var uuidConnectFallback: DispatchWorkItem?
+    private var skipUUIDFastPathOnce = false
+
+    private func scheduleUUIDConnectFallback() {
+        // Arm once and let the clock run: the reconnection timer re-enters
+        // startScan()/connectByUUID() on a shorter period than this timeout,
+        // and re-arming on every pass would reset the clock forever.
+        if uuidConnectFallback != nil { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.uuidConnectFallback = nil
+            guard self.peripheral?.state != .connected else { return }
+            Bridge.log(
+                "NEX-CONN: ⏱️ Stored-UUID connect did not complete in 8s (stale iOS identifier?). Cancelling; falling back to name scan."
+            )
+            if let pending = self.peripheral {
+                self.centralManager?.cancelPeripheralConnection(pending)
+            }
+            self.peripheral = nil
+            self.skipUUIDFastPathOnce = true
+            self.startScan()
+        }
+        uuidConnectFallback = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: work)
+    }
+
     private func connectByUUID() -> Bool {
         guard let uuid = peripheralUUID else {
             Bridge.log("NEX-CONN: 🔵 No stored UUID to connect by.")
@@ -1019,6 +1052,7 @@ class MentraNexSGC: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, SG
         )
         peripheral = peripheralToConnect
         centralManager.connect(peripheralToConnect, options: nil)
+        scheduleUUIDConnectFallback()
         return true
     }
 
@@ -1088,8 +1122,10 @@ class MentraNexSGC: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, SG
         // A user-initiated discovery scan must fall through to scanForPeripherals so the
         // device list populates even after we've previously paired (which persisted a UUID).
         if !isDiscoveryScan {
+            let skipUUIDPath = skipUUIDFastPathOnce
+            skipUUIDFastPathOnce = false
             // First, try to reconnect using stored UUID (faster and works in background)
-            if connectByUUID() {
+            if !skipUUIDPath, connectByUUID() {
                 Bridge.log("NEX-CONN: 🔄 Attempting connection with stored UUID. Halting scan.")
                 return
             }
@@ -2810,6 +2846,8 @@ class MentraNexSGC: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, SG
 
     func centralManager(_: CBCentralManager, didConnect peripheral: CBPeripheral) {
         Bridge.log("NEX-CONN: ✅ Successfully connected to \(peripheral.name ?? "unknown device").")
+        uuidConnectFallback?.cancel()
+        uuidConnectFallback = nil
         isConnecting = false
         peripheralUUID = peripheral.identifier // Persist UUID
         stopReconnectionTimer() // Successfully connected, stop trying to reconnect.
