@@ -22,6 +22,7 @@
 
 import CoreBluetooth
 import Foundation
+import Photos
 
 class CyclopsSGC: MentraNexSGC {
     // MARK: - Singleton (parallel to MentraNexSGC.getInstance())
@@ -126,11 +127,42 @@ class CyclopsSGC: MentraNexSGC {
 
     private func handlePhoto(jpeg: Data, width: UInt16, height: UInt16) {
         Bridge.log("CYCLOPS: 📸 photo received: \(jpeg.count) B (\(width)x\(height))")
-        // TODO(next session, on-Mac): route into the app's photo-request flow
-        // (BlePhotoUploadService.processAndUploadPhoto with the pending
-        // requestId/webhookUrl, per the MentraLive pattern). Until a photo
-        // request correlates it, the frame is logged and retained.
         lastPhoto = jpeg
+        // Local-first delivery (owner decision 2026-08-20): every frame goes
+        // straight to the iOS photo library — no cloud, no sync step. The
+        // in-app Gallery index (localStorageService rows, export receipts) is
+        // a follow-up; requestId-correlated miniapp delivery is gated on the
+        // cloud-photo decision in PROJECT_STATE.
+        saveToPhotoLibrary(jpeg)
+    }
+
+    private func saveToPhotoLibrary(_ jpeg: Data) {
+        let save = {
+            PHPhotoLibrary.shared().performChanges({
+                let request = PHAssetCreationRequest.forAsset()
+                request.addResource(with: .photo, data: jpeg, options: nil)
+            }) { success, error in
+                if success {
+                    Bridge.log("CYCLOPS: 📸 saved to camera roll (\(jpeg.count) B)")
+                } else {
+                    Bridge.log("CYCLOPS: ❌ camera-roll save failed: \(error?.localizedDescription ?? "?")")
+                }
+            }
+        }
+        switch PHPhotoLibrary.authorizationStatus(for: .addOnly) {
+        case .authorized, .limited:
+            save()
+        case .notDetermined:
+            PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+                if status == .authorized || status == .limited {
+                    save()
+                } else {
+                    Bridge.log("CYCLOPS: ❌ photo-library add permission denied — frame kept in lastPhoto only")
+                }
+            }
+        default:
+            Bridge.log("CYCLOPS: ❌ photo-library access denied — frame kept in lastPhoto only")
+        }
     }
 
     /// Most recent photo delivered over the CoC channel (debug surface until
