@@ -30,6 +30,7 @@ import {useAppStatusStore} from "../stores/apps"
 import {retirePendingSelectionOnPromotion} from "./PairingIdentity"
 import GlobalEventEmitter from "../utils/GlobalEventEmitter"
 import {asgCameraApi} from "./asg/asgCameraApi"
+import {localStorageService} from "./asg/localStorageService"
 
 let subs: Array<{remove: () => void}> = []
 
@@ -193,6 +194,43 @@ export function startDeviceEventRouter(): void {
         z: event.z,
         timestamp: typeof event.timestamp === "number" ? event.timestamp : Date.now(),
       })
+    }),
+  )
+  // Cyclops captures — indexed into the gallery store as they arrive.
+  //
+  // Unlike Mentra Live (photos sit on the glasses until a WiFi hotspot sync
+  // pulls them in bulk), Cyclops pushes every frame over its L2CAP CoC channel
+  // at capture time. The native driver has already written the JPEG into
+  // Documents/MentraPhotos and, when permission allowed, saved it to the camera
+  // roll; all that is left is the index row that makes the Gallery screen show
+  // it. The camera-roll identifier is persisted as an assetReceipt so
+  // cameraRollExportCoordinator treats the frame as already exported instead of
+  // saving a second copy.
+  subs.push(
+    BluetoothSdk.addListener("cyclops_photo_saved", (event) => {
+      void localStorageService
+        .saveDownloadedFile({
+          name: event.name,
+          filePath: event.filePath,
+          size: event.size,
+          modified: event.modified,
+          mime_type: "image/jpeg",
+          is_video: false,
+          downloaded_at: Date.now(),
+          glassesModel: "Cyclops",
+          ...(event.assetIdentifier
+            ? {
+                assetReceipt: {
+                  platform: "ios" as const,
+                  identifier: event.assetIdentifier,
+                  exportedAt: Date.now(),
+                },
+              }
+            : {}),
+        })
+        .catch((error) => {
+          console.error("[DeviceEventRouter] Failed to index Cyclops photo:", error)
+        })
     }),
   )
   // Head position — translate native {up:boolean} → SDK {position:"up"|"down"}.

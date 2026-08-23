@@ -34,6 +34,9 @@ public class BluetoothSdkModule: Module, MentraBluetoothSDKDelegate {
             "camera_status",
             "video_recording_status",
             "media_success",
+            // Cyclops pushes each capture over its CoC channel as it is taken
+            // (no WiFi bulk sync), so the gallery index is fed by this event.
+            "cyclops_photo_saved",
             "media_error",
             "gallery_status",
             "compatible_glasses_search_stop",

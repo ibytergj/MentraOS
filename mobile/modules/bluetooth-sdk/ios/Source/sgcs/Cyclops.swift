@@ -136,12 +136,59 @@ class CyclopsSGC: MentraNexSGC {
          * scene-verified finding and the Viewfinder's identical correction. */
         let corrected = reoriented(jpeg, .downMirrored)
         lastPhoto = corrected
-        // Local-first delivery (owner decision 2026-08-20): every frame goes
-        // straight to the iOS photo library — no cloud, no sync step. The
-        // in-app Gallery index (localStorageService rows, export receipts) is
-        // a follow-up; requestId-correlated miniapp delivery is gated on the
-        // cloud-photo decision in PROJECT_STATE.
-        saveToPhotoLibrary(corrected)
+        deliverPhoto(corrected, width: width, height: height)
+    }
+
+    /* Local-first delivery (owner decision 2026-08-20): no cloud, no sync step.
+     * Two destinations, in one pass:
+     *   1. the app's own gallery store (Documents/MentraPhotos) plus a
+     *      `cyclops_photo_saved` event so JS can index it — that is what makes
+     *      the frame show up in the in-app Gallery;
+     *   2. the iOS photo library, as before.
+     * The camera-roll asset id travels with the event and is persisted as the
+     * row's assetReceipt, so cameraRollExportCoordinator sees the frame as
+     * already exported and does not save a second copy. */
+    private func deliverPhoto(_ jpeg: Data, width: UInt16, height: UInt16) {
+        let timestamp = Int64(Date().timeIntervalSince1970 * 1000)
+        let name = "CYCLOPS_\(timestamp).jpg"
+        let filePath = writeToGalleryStore(jpeg, name: name)
+
+        saveToPhotoLibrary(jpeg) { assetIdentifier in
+            guard let filePath else { return }
+            Bridge.sendTypedMessage("cyclops_photo_saved", body: [
+                "name": name,
+                "filePath": filePath,
+                "size": jpeg.count,
+                "modified": timestamp,
+                "width": Int(width),
+                "height": Int(height),
+                "assetIdentifier": assetIdentifier as Any,
+            ])
+        }
+    }
+
+    /// Writes the frame into the same directory the gallery's WiFi-sync path
+    /// uses (`Documents/MentraPhotos`), which is also the only location
+    /// localStorageService can persist as a portable relative path.
+    /// Returns the absolute path, or nil if the write failed.
+    private func writeToGalleryStore(_ jpeg: Data, name: String) -> String? {
+        let fm = FileManager.default
+        guard let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            Bridge.log("CYCLOPS: ❌ no Documents directory — gallery copy skipped")
+            return nil
+        }
+        let dir = docs.appendingPathComponent("MentraPhotos", isDirectory: true)
+        do {
+            if !fm.fileExists(atPath: dir.path) {
+                try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            }
+            let url = dir.appendingPathComponent(name)
+            try jpeg.write(to: url, options: .atomic)
+            return url.path
+        } catch {
+            Bridge.log("CYCLOPS: ❌ gallery copy failed: \(error.localizedDescription)")
+            return nil
+        }
     }
 
     /// Returns `jpeg` with its EXIF orientation tag set. ImageIO copies the
@@ -160,16 +207,23 @@ class CyclopsSGC: MentraNexSGC {
         return out as Data
     }
 
-    private func saveToPhotoLibrary(_ jpeg: Data) {
+    /// Saves to the iOS photo library. `completion` always runs — with the new
+    /// asset's local identifier on success, nil otherwise — so the gallery row
+    /// is still indexed when the library is unavailable or permission is denied.
+    private func saveToPhotoLibrary(_ jpeg: Data, completion: @escaping (String?) -> Void) {
         let save = {
+            var placeholderId: String?
             PHPhotoLibrary.shared().performChanges({
                 let request = PHAssetCreationRequest.forAsset()
                 request.addResource(with: .photo, data: jpeg, options: nil)
+                placeholderId = request.placeholderForCreatedAsset?.localIdentifier
             }) { success, error in
                 if success {
                     Bridge.log("CYCLOPS: 📸 saved to camera roll (\(jpeg.count) B)")
+                    completion(placeholderId)
                 } else {
                     Bridge.log("CYCLOPS: ❌ camera-roll save failed: \(error?.localizedDescription ?? "?")")
+                    completion(nil)
                 }
             }
         }
@@ -181,11 +235,13 @@ class CyclopsSGC: MentraNexSGC {
                 if status == .authorized || status == .limited {
                     save()
                 } else {
-                    Bridge.log("CYCLOPS: ❌ photo-library add permission denied — frame kept in lastPhoto only")
+                    Bridge.log("CYCLOPS: ❌ photo-library add permission denied — gallery copy kept")
+                    completion(nil)
                 }
             }
         default:
-            Bridge.log("CYCLOPS: ❌ photo-library access denied — frame kept in lastPhoto only")
+            Bridge.log("CYCLOPS: ❌ photo-library access denied — gallery copy kept")
+            completion(nil)
         }
     }
 

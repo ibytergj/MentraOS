@@ -51,6 +51,12 @@ class LogRingBuffer {
     this.isIntercepting = true
 
     const ignoredLogs = [
+      // Cyclops LC3 mic streams ~100 packets/s; retaining these two per-packet
+      // lines in the dev console grows memory until iOS jetsams the app
+      // (observed 2026-08-21). Filtered here so they never reach the console
+      // buffers; suppressing them native-side is queued for the next rebuild.
+      /Processing packet type: 0xA0/,
+      /LC3 packet sequence mismatch/,
       /Failed to open debugger. Please check that the dev server is running and reload the app./,
       /Require cycle:/,
       /is missing the required default export./,

@@ -331,6 +331,24 @@ export type VideoRecordingStoppedStatusEvent = Omit<VideoRecordingStatusEvent, "
 
 export type VideoRecordingSuccessStatusEvent = VideoRecordingStartedStatusEvent | VideoRecordingStoppedStatusEvent
 
+/**
+ * A Cyclops capture that has already been written to the app's gallery store.
+ * Cyclops pushes each photo over its L2CAP CoC channel as it is taken, so there
+ * is no WiFi bulk-sync step: the native driver writes the file and emits this,
+ * and the device-event router indexes it. `assetIdentifier` is the iOS photo
+ * library local identifier when the frame was also saved to the camera roll —
+ * carried so the row can record an export receipt and avoid a duplicate export.
+ */
+export type CyclopsPhotoSavedEvent = {
+  name: string
+  filePath: string
+  size: number
+  modified: number
+  width: number
+  height: number
+  assetIdentifier?: string | null
+}
+
 export type MediaUploadSuccessEvent = {
   type: "media_success"
   requestId: string
@@ -885,6 +903,7 @@ export type BluetoothSdkModuleEvents = {
   camera_status: (event: CameraStatusEvent) => void
   video_recording_status: (event: VideoRecordingStatusEvent) => void
   media_success: (event: MediaUploadSuccessEvent) => void
+  cyclops_photo_saved: (event: CyclopsPhotoSavedEvent) => void
   media_error: (event: MediaUploadErrorEvent) => void
   gallery_status: (event: GalleryStatusEvent) => void
   compatible_glasses_search_stop: (event: CompatibleGlassesSearchStopEvent) => void
@@ -980,6 +999,7 @@ export type BluetoothSdkEventMap = {
   camera_status: CameraStatusEvent
   video_recording_status: VideoRecordingStatusEvent
   media_success: MediaUploadSuccessEvent
+  cyclops_photo_saved: CyclopsPhotoSavedEvent
   media_error: MediaUploadErrorEvent
   gallery_status: GalleryStatusEvent
   compatible_glasses_search_stop: CompatibleGlassesSearchStopEvent

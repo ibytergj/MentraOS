@@ -1959,7 +1959,12 @@ class MentraNexSGC: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, SG
         guard data.count > 0 else { return }
 
         let packetType = data[0]
-        Bridge.log("NEX: Processing packet type: 0x\(String(format: "%02X", packetType))")
+        // Audio (0xA0) arrives ~100x/s while the mic is live; logging each one
+        // crosses the JS bridge per packet and grew memory until iOS jetsammed
+        // the app (2026-08-21). Every other packet type is low-rate.
+        if packetType != PACKET_TYPE_AUDIO {
+            Bridge.log("NEX: Processing packet type: 0x\(String(format: "%02X", packetType))")
+        }
 
         switch packetType {
         case PACKET_TYPE_JSON:
