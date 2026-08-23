@@ -4,15 +4,20 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  scripts/export-bluetooth-sdk-ios-spm.sh [target-dir] [--verify]
+  scripts/export-bluetooth-sdk-ios-spm.sh [target-dir] [--verify] [--with-cyclops]
 
 Exports the SwiftPM-ready iOS Bluetooth SDK from the MentraOS monorepo into a
 standalone package repository. The target defaults to ../mentra-bluetooth-sdk-ios.
 
 Options:
-  --target DIR   Export into DIR.
-  --verify       Run SwiftPM describe and a generic iOS xcodebuild after export.
-  -h, --help     Show this help.
+  --target DIR    Export into DIR.
+  --verify        Run SwiftPM describe and a generic iOS xcodebuild after export.
+  --with-cyclops  Include the Nex/Cyclops device support (MentraNex, Cyclops and
+                  the protobuf gencode), adding a SwiftProtobuf dependency and
+                  defining MENTRA_FEATURE_NEX. Defaults the target to
+                  ../mentra-bluetooth-sdk-ios-cyclops so the two exports never
+                  collide. Without this flag the export is unchanged.
+  -h, --help      Show this help.
 EOF
 }
 
@@ -20,19 +25,27 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 sdk_root="$repo_root/mobile/modules/bluetooth-sdk"
 target_root="$repo_root/../mentra-bluetooth-sdk-ios"
 verify=0
+with_cyclops=0
+target_explicit=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --target)
       target_root="$2"
+      target_explicit=1
       shift 2
       ;;
     --target=*)
       target_root="${1#--target=}"
+      target_explicit=1
       shift
       ;;
     --verify)
       verify=1
+      shift
+      ;;
+    --with-cyclops)
+      with_cyclops=1
       shift
       ;;
     -h|--help)
@@ -41,10 +54,16 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       target_root="$1"
+      target_explicit=1
       shift
       ;;
   esac
 done
+
+# Separate default so the two exports never overwrite each other.
+if [[ "$with_cyclops" -eq 1 && "$target_explicit" -eq 0 ]]; then
+  target_root="$repo_root/../mentra-bluetooth-sdk-ios-cyclops"
+fi
 
 if [[ ! -d "$sdk_root/ios/Source" ]]; then
   echo "Could not find Bluetooth SDK source at $sdk_root" >&2
@@ -90,6 +109,52 @@ find "$target_root" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf -- {} +
 
 mkdir -p "$target_root/ios/Source" "$target_root/ios/Packages/CoreObjC"
 
+if [[ "$with_cyclops" -eq 1 ]]; then
+cat > "$target_root/Package.swift" <<'EOF'
+// swift-tools-version: 5.9
+import PackageDescription
+
+let package = Package(
+  name: "MentraBluetoothSDK",
+  platforms: [
+    .iOS("15.1")
+  ],
+  products: [
+    .library(
+      name: "MentraBluetoothSDK",
+      targets: ["MentraBluetoothSDK"]
+    )
+  ],
+  dependencies: [
+    .package(url: "https://github.com/apple/swift-protobuf.git", from: "1.28.0")
+  ],
+  targets: [
+    .target(
+      name: "MentraBluetoothSDK",
+      dependencies: [
+        "MentraBluetoothSDKCoreObjC",
+        .product(name: "SwiftProtobuf", package: "swift-protobuf")
+      ],
+      path: "ios/Source",
+      resources: [
+        .process("PrivacyInfo.xcprivacy")
+      ],
+      swiftSettings: [
+        .define("MENTRA_FEATURE_NEX")
+      ]
+    ),
+    .target(
+      name: "MentraBluetoothSDKCoreObjC",
+      path: "ios/Packages/CoreObjC",
+      publicHeadersPath: "include",
+      cSettings: [
+        .headerSearchPath(".")
+      ]
+    )
+  ]
+)
+EOF
+else
 cat > "$target_root/Package.swift" <<'EOF'
 // swift-tools-version: 5.9
 import PackageDescription
@@ -127,6 +192,7 @@ let package = Package(
   ]
 )
 EOF
+fi
 
 cat > "$target_root/.gitignore" <<'EOF'
 .DS_Store
@@ -234,20 +300,39 @@ This Swift package contains the core iOS Bluetooth SDK. It intentionally exclude
 EOF
 perl -0pi -e "s/__SDK_VERSION__/${sdk_version}/g" "$target_root/README.md"
 
+if [[ "$with_cyclops" -eq 1 ]]; then
+  # Scope note and the install URLs both differ for this variant: it carries the
+  # Nex/Cyclops sources and is published from the OpenWearableAI fork's package
+  # repo, not Mentra-Community's.
+  perl -0pi -e "s{This Swift package contains the core iOS Bluetooth SDK\. It intentionally excludes optional MentraOS-internal code paths for local STT, offline TTS, Nex/Cyclops/SwiftProtobuf, Vuzix/Ultralite, and tar\.bz2 extraction\.}{This Swift package contains the core iOS Bluetooth SDK **including Nex/Cyclops device support** (MentraNex, Cyclops and the protobuf control-plane gencode), built with \`MENTRA_FEATURE_NEX\` and depending on SwiftProtobuf. It intentionally excludes optional MentraOS-internal code paths for local STT, offline TTS, Vuzix/Ultralite, and tar.bz2 extraction.}g" \
+    "$target_root/README.md"
+  perl -0pi -e "s{https://github\.com/Mentra-Community/mentra-bluetooth-sdk-ios\.git}{https://github.com/ibytergj/mentra-bluetooth-sdk-ios-cyclops.git}g" \
+    "$target_root/README.md"
+  perl -0pi -e "s{package: \"mentra-bluetooth-sdk-ios\"}{package: \"mentra-bluetooth-sdk-ios-cyclops\"}g" \
+    "$target_root/README.md"
+fi
+
 cp "$repo_root/LICENSE" "$target_root/LICENSE"
 
 # Keep this list limited to optional/internal code paths that need dependencies
 # not exported in the public SwiftPM package.
 source_excludes=(
   "/Bridging-Header.h"
-  "/sgcs/Cyclops.swift"
   "/sgcs/Mach1.swift"
-  "/sgcs/MentraNex.swift"
-  "/sgcs/mentraos_ble.pb.swift"
   "/stt/***"
   "/tts/***"
   "/utils/TarBz2Extractor.swift"
 )
+
+# Nex/Cyclops and the protobuf gencode need SwiftProtobuf, so they are excluded
+# from the stock export and included only under --with-cyclops.
+if [[ "$with_cyclops" -eq 0 ]]; then
+  source_excludes+=(
+    "/sgcs/Cyclops.swift"
+    "/sgcs/MentraNex.swift"
+    "/sgcs/mentraos_ble.pb.swift"
+  )
+fi
 
 source_rsync_args=(-a)
 for exclude_path in "${source_excludes[@]}"; do
