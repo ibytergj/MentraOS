@@ -191,26 +191,83 @@ class CyclopsSGC: MentraNexSGC {
         }
     }
 
-    /// Returns `jpeg` with its EXIF orientation tag set, rewriting metadata only.
+    /// Returns `jpeg` carrying the given EXIF orientation.
     ///
-    /// `CGImageDestinationCopyImageSource` copies the compressed scan data
-    /// verbatim; `AddImageFromSource` (used first) decodes and re-encodes,
-    /// which inflated frames ~46% (166 KB → 243 KB, measured 2026-08-23) and
-    /// re-compressed already-lossy JPEG for nothing. Falls back to the input
-    /// unchanged if anything fails: never lose the frame over a metadata edit.
+    /// The sensor emits JPEGs with **no EXIF block at all**, which rules out
+    /// `CGImageDestinationCopyImageSource`: it *merges* metadata, so with
+    /// nothing to merge into it silently writes no tag (measured 2026-08-23 —
+    /// bytes preserved, orientation still nil, photos upside down).
+    /// `AddImageFromSource` does write the tag, but only by decoding and
+    /// re-encoding: ~46% inflation and a needless recompression of
+    /// already-lossy data.
+    ///
+    /// So splice in a minimal APP1/Exif segment ourselves: 36 bytes holding a
+    /// single Orientation tag, inserted after SOI (and after JFIF/APP0 if
+    /// present). The compressed scan data is copied verbatim — verified
+    /// byte-identical. Falls back to the ImageIO re-encode if the frame already
+    /// carries EXIF, and to the untouched frame if even that fails: never lose
+    /// a photo over a metadata edit.
     private func reoriented(_ jpeg: Data, _ orientation: CGImagePropertyOrientation) -> Data {
+        if let spliced = injectingExifOrientation(jpeg, orientation.rawValue) {
+            return spliced
+        }
         guard let src = CGImageSourceCreateWithData(jpeg as CFData, nil),
               let uti = CGImageSourceGetType(src) else { return jpeg }
         let out = NSMutableData()
         guard let dst = CGImageDestinationCreateWithData(out, uti, 1, nil) else { return jpeg }
-        let props: [CFString: Any] = [kCGImagePropertyOrientation: orientation.rawValue]
-        guard CGImageDestinationCopyImageSource(dst, src, props as CFDictionary, nil) else { return jpeg }
+        var props = (CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]) ?? [:]
+        props[kCGImagePropertyOrientation] = orientation.rawValue
+        CGImageDestinationAddImageFromSource(dst, src, 0, props as CFDictionary)
+        guard CGImageDestinationFinalize(dst) else { return jpeg }
         return out as Data
     }
 
-    /// Saves to the iOS photo library. `completion` always runs — with the new
-    /// asset's local identifier on success, nil otherwise — so the gallery row
-    /// is still indexed when the library is unavailable or permission is denied.
+    /// Builds an APP1/Exif segment carrying only the Orientation tag.
+    private func exifOrientationSegment(_ orientation: UInt32) -> Data {
+        let value = UInt16(truncatingIfNeeded: orientation)
+        var tiff = Data()
+        tiff.append(contentsOf: [0x49, 0x49])              // "II" — little-endian
+        tiff.append(contentsOf: [0x2A, 0x00])              // magic 42
+        tiff.append(contentsOf: [0x08, 0x00, 0x00, 0x00])  // IFD0 at offset 8
+        tiff.append(contentsOf: [0x01, 0x00])              // one entry
+        tiff.append(contentsOf: [0x12, 0x01])              // tag 0x0112 Orientation
+        tiff.append(contentsOf: [0x03, 0x00])              // type SHORT
+        tiff.append(contentsOf: [0x01, 0x00, 0x00, 0x00])  // count 1
+        tiff.append(contentsOf: [UInt8(value & 0xFF), UInt8(value >> 8), 0x00, 0x00])
+        tiff.append(contentsOf: [0x00, 0x00, 0x00, 0x00])  // no next IFD
+        var payload = Data("Exif".utf8)
+        payload.append(contentsOf: [0x00, 0x00])
+        payload.append(tiff)
+        let length = payload.count + 2
+        var segment = Data([0xFF, 0xE1, UInt8(length >> 8), UInt8(length & 0xFF)])
+        segment.append(payload)
+        return segment
+    }
+
+    /// Splices the orientation segment in after SOI. Returns nil when the frame
+    /// already has an APP1 block or is not a JPEG we recognise.
+    private func injectingExifOrientation(_ jpeg: Data, _ orientation: UInt32) -> Data? {
+        let bytes = [UInt8](jpeg)
+        guard bytes.count > 4, bytes[0] == 0xFF, bytes[1] == 0xD8 else { return nil }
+        var index = 2
+        while index + 3 < bytes.count, bytes[index] == 0xFF {
+            let marker = bytes[index + 1]
+            if marker == 0xE1 { return nil }                  // already has EXIF
+            if marker == 0xDA || marker == 0xD9 { break }     // scan / end
+            let segmentLength = Int(bytes[index + 2]) << 8 | Int(bytes[index + 3])
+            if segmentLength < 2 { return nil }
+            if marker == 0xE0 {                               // keep JFIF ahead of us
+                index += 2 + segmentLength
+                continue
+            }
+            break
+        }
+        var out = jpeg.prefix(index)
+        out.append(exifOrientationSegment(orientation))
+        out.append(jpeg.suffix(from: index))
+        return out
+    }
+
     private func saveToPhotoLibrary(_ jpeg: Data, completion: @escaping (String?) -> Void) {
         let save = {
             var placeholderId: String?
