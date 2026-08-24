@@ -228,6 +228,12 @@ export function startDeviceEventRouter(): void {
               }
             : {}),
         })
+        .then(() => {
+          // Cyclops photos arrive while the Gallery may already be open. Its
+          // only other refresh trigger is screen focus, so without this the
+          // user has to navigate away and back to see a capture they just took.
+          GlobalEventEmitter.emit("gallery_index_updated", {name: event.name})
+        })
         .catch((error) => {
           console.error("[DeviceEventRouter] Failed to index Cyclops photo:", error)
         })

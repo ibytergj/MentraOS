@@ -7,6 +7,8 @@ import {getModelCapabilities} from "@/../../cloud/packages/types/src"
 import {MaterialCommunityIcons} from "@expo/vector-icons"
 import LinearGradient from "expo-linear-gradient"
 import {useFocusEffect} from "expo-router"
+
+import GlobalEventEmitter from "@/utils/GlobalEventEmitter"
 import {useCallback, useEffect, useMemo, useRef, useState} from "react"
 import {
   ActivityIndicator,
@@ -858,6 +860,20 @@ export function GalleryScreen() {
       loadDownloadedPhotos()
     }, []),
   )
+
+  // Live refresh for push-delivered captures (Cyclops sends each photo over
+  // BLE as it is taken, rather than in a WiFi sync the user initiates), so a
+  // photo taken with the gallery already open appears without navigating away.
+  useEffect(() => {
+    const onIndexUpdated = () => {
+      console.log("[GalleryScreen] Gallery index updated - refreshing")
+      loadDownloadedPhotos()
+    }
+    GlobalEventEmitter.on("gallery_index_updated", onIndexUpdated)
+    return () => {
+      GlobalEventEmitter.off("gallery_index_updated", onIndexUpdated)
+    }
+  }, [loadDownloadedPhotos])
 
   // Handle back button
   useFocusEffect(

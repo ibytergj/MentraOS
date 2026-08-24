@@ -191,19 +191,20 @@ class CyclopsSGC: MentraNexSGC {
         }
     }
 
-    /// Returns `jpeg` with its EXIF orientation tag set. ImageIO copies the
-    /// compressed pixel data untouched and only rewrites metadata — no
-    /// re-encode. Falls back to the input unchanged if anything fails: never
-    /// lose the frame over a metadata edit.
+    /// Returns `jpeg` with its EXIF orientation tag set, rewriting metadata only.
+    ///
+    /// `CGImageDestinationCopyImageSource` copies the compressed scan data
+    /// verbatim; `AddImageFromSource` (used first) decodes and re-encodes,
+    /// which inflated frames ~46% (166 KB → 243 KB, measured 2026-08-23) and
+    /// re-compressed already-lossy JPEG for nothing. Falls back to the input
+    /// unchanged if anything fails: never lose the frame over a metadata edit.
     private func reoriented(_ jpeg: Data, _ orientation: CGImagePropertyOrientation) -> Data {
         guard let src = CGImageSourceCreateWithData(jpeg as CFData, nil),
               let uti = CGImageSourceGetType(src) else { return jpeg }
         let out = NSMutableData()
         guard let dst = CGImageDestinationCreateWithData(out, uti, 1, nil) else { return jpeg }
-        var props = (CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]) ?? [:]
-        props[kCGImagePropertyOrientation] = orientation.rawValue
-        CGImageDestinationAddImageFromSource(dst, src, 0, props as CFDictionary)
-        guard CGImageDestinationFinalize(dst) else { return jpeg }
+        let props: [CFString: Any] = [kCGImagePropertyOrientation: orientation.rawValue]
+        guard CGImageDestinationCopyImageSource(dst, src, props as CFDictionary, nil) else { return jpeg }
         return out as Data
     }
 
