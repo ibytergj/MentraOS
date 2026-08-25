@@ -63,6 +63,7 @@ class CyclopsSGC: MentraNexSGC {
 
     private var photoChannel: CBL2CAPChannel?
     private var photoReader: CyclopsCocPhotoReader?
+    private var photoChannelOpening = false
 
     /* CoreBluetooth delegate methods are @objc protocol members, so these
      * overrides dispatch correctly even if the parent implements them in an
@@ -100,8 +101,17 @@ class CyclopsSGC: MentraNexSGC {
                 let psm = CBL2CAPPSM(UInt16(data[data.startIndex])
                     | UInt16(data[data.startIndex + 1]) << 8)
                 if psm != 0 {
-                    Bridge.log("CYCLOPS: photo CoC PSM \(psm) — opening channel")
-                    peripheral.openL2CAPChannel(psm)
+                    // Discovery and subscription re-run on every reconnect, so
+                    // this read can fire more than once per link. Racing two
+                    // openL2CAPChannel calls tears down the winner (observed
+                    // 2026-08-25: CoC OPEN then closed 54 ms later).
+                    if photoChannelOpening || photoChannel != nil {
+                        Bridge.log("CYCLOPS: photo CoC PSM \(psm) — channel already open/opening, skipping")
+                    } else {
+                        photoChannelOpening = true
+                        Bridge.log("CYCLOPS: photo CoC PSM \(psm) — opening channel")
+                        peripheral.openL2CAPChannel(psm)
+                    }
                 }
             }
             return
@@ -113,10 +123,15 @@ class CyclopsSGC: MentraNexSGC {
      * no override keyword. If upstream ever adds one, the compiler will say
      * so on the Mac and this becomes an override calling super. */
     func peripheral(_ peripheral: CBPeripheral, didOpen channel: CBL2CAPChannel?, error: Error?) {
+        photoChannelOpening = false
         guard let channel else {
             Bridge.log("CYCLOPS: CoC open failed: \(error?.localizedDescription ?? "?")")
             return
         }
+        // A previous reader (stale connection) must be torn down explicitly —
+        // silently replacing it left its streams scheduled with a delegate
+        // about to deallocate.
+        photoReader?.detach()
         photoChannel = channel
         let reader = CyclopsCocPhotoReader { [weak self] jpeg, width, height in
             self?.handlePhoto(jpeg: jpeg, width: width, height: height)
@@ -308,6 +323,7 @@ class CyclopsSGC: MentraNexSGC {
     private(set) var lastPhoto: Data?
 
     override func cleanup() {
+        photoChannelOpening = false
         photoReader?.detach()
         photoReader = nil
         photoChannel = nil
@@ -332,23 +348,42 @@ final class CyclopsCocPhotoReader: NSObject, StreamDelegate {
         self.onPhoto = onPhoto
     }
 
+    /* The stream must NOT live on the main RunLoop: when iOS backgrounds the
+     * app the main loop parks, the stream stops being serviced, flow-control
+     * credits dry up and the channel collapses — photos pressed while the app
+     * was off-screen died here (2026-08-25). A dedicated thread keeps
+     * servicing L2CAP data during background BLE wakes, which the app's
+     * bluetooth-central mode entitles it to. */
+    private var streamThread: Thread?
+
     func attach(channel: CBL2CAPChannel) {
         self.channel = channel
         guard let input = channel.inputStream else { return }
         input.delegate = self
-        input.schedule(in: .main, forMode: .default)
-        input.open()
-        channel.outputStream?.open()
+        let thread = Thread { [weak self] in
+            input.schedule(in: .current, forMode: .default)
+            input.open()
+            channel.outputStream?.open()
+            while let self, self.channel != nil, !Thread.current.isCancelled {
+                RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.25))
+            }
+        }
+        thread.name = "CyclopsCoCStream"
+        thread.qualityOfService = .userInitiated
+        streamThread = thread
+        thread.start()
     }
 
     func detach() {
-        if let input = channel?.inputStream {
-            input.close()
-            input.remove(from: .main, forMode: .default)
+        let closing = channel
+        channel = nil // ends the stream thread's loop
+        streamThread?.cancel()
+        streamThread = nil
+        if let input = closing?.inputStream {
             input.delegate = nil
+            input.close()
         }
-        channel?.outputStream?.close()
-        channel = nil
+        closing?.outputStream?.close()
         buf.removeAll()
     }
 
