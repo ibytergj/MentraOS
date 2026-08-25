@@ -322,6 +322,21 @@ class CyclopsSGC: MentraNexSGC {
     /// the photo-request flow is wired).
     private(set) var lastPhoto: Data?
 
+    /* The link dying must clear the channel state, or the duplicate-open
+     * guard points at a dead channel forever and blocks every reopen after a
+     * board reboot (observed 2026-08-25: "already open/opening, skipping" on
+     * each reconnect until app relaunch). cleanup() is not called on
+     * transient disconnects, so hook the disconnect delegate directly. */
+    override func centralManager(_ central: CBCentralManager,
+                                 didDisconnectPeripheral peripheral: CBPeripheral,
+                                 error: Error?) {
+        photoChannelOpening = false
+        photoReader?.detach()
+        photoReader = nil
+        photoChannel = nil
+        super.centralManager(central, didDisconnectPeripheral: peripheral, error: error)
+    }
+
     override func cleanup() {
         photoChannelOpening = false
         photoReader?.detach()
